@@ -1,0 +1,23 @@
+# Gradle and Android Studio
+.gradle/
+**/.gradle/
+**/build/
+local.properties
+**/local.properties
+.idea/
+*.iml
+
+# Generated Android packages and signing material
+*.apk
+*.aab
+*.jks
+*.keystore
+keystore.properties
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+
+# Editor and OS files
+.vscode/
+.DS_Store
