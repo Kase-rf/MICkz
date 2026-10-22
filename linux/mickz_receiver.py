@@ -65,12 +65,14 @@ class Receiver:
     def setup_source(self) -> None:
         if not shutil.which("pactl"):
             raise RuntimeError("Não encontrei pactl. Instale PipeWire com pipewire-pulse.")
+        self.remove_stale_sources()
         self.fifo_dir = tempfile.mkdtemp(prefix="mickz-")
         self.fifo_path = os.path.join(self.fifo_dir, "audio.pcm")
         os.mkfifo(self.fifo_path, 0o600)
         # Keep the FIFO open read/write so both module startup and client reconnects
-        # work without blocking on a missing FIFO peer.
-        self.fifo_fd = os.open(self.fifo_path, os.O_RDWR)
+        # work without blocking on a missing FIFO peer. Nonblocking writes prevent
+        # a suspended PipeWire source from stopping TCP reads from the phone.
+        self.fifo_fd = os.open(self.fifo_path, os.O_RDWR | os.O_NONBLOCK)
         self.module_id = run_checked([
             "pactl", "load-module", "module-pipe-source",
             f"file={self.fifo_path}", f"source_name={SOURCE_NAME}",
@@ -79,10 +81,26 @@ class Receiver:
         ])
         print(f"Fonte de entrada criada: {SOURCE_NAME} (MICkz_Android_Microphone)")
 
+    @staticmethod
+    def remove_stale_sources() -> None:
+        """Remove abandoned MICkz modules left by an interrupted receiver."""
+        modules = run_checked(["pactl", "list", "short", "modules"])
+        stale_ids: list[str] = []
+        for line in modules.splitlines():
+            fields = line.split("\t", 2)
+            if len(fields) != 3 or fields[1] != "module-pipe-source":
+                continue
+            if f"source_name={SOURCE_NAME}" in fields[2].split():
+                stale_ids.append(fields[0])
+        for module_id in stale_ids:
+            subprocess.run(["pactl", "unload-module", module_id], check=True, capture_output=True, text=True)
+            print(f"Fonte MICkz antiga removida (módulo {module_id})")
+
     def serve_client(self, connection: socket.socket, address: tuple[str, int]) -> None:
         print(f"Android conectado: {address[0]}:{address[1]}")
         next_report = time.monotonic() + 2.0
         bytes_reported = 0
+        dropped_frames = 0
         peak = 0
         sum_squares = 0
         sample_count = 0
@@ -97,19 +115,27 @@ class Receiver:
                 peak = max(peak, max(abs(sample) for sample in samples))
                 sum_squares += sum(sample * sample for sample in samples)
                 sample_count += len(samples)
-                written = os.write(self.fifo_fd, frame)
-                if written != len(frame):
+                try:
+                    written = os.write(self.fifo_fd, frame)
+                except BlockingIOError:
+                    # PipeWire may suspend this source until an app selects it.
+                    # Keep draining TCP and report levels instead of deadlocking.
+                    written = 0
+                    dropped_frames += 1
+                if written not in (0, len(frame)):
                     raise OSError(f"Escrita PCM incompleta: {written}/{len(frame)} bytes")
-                bytes_reported += written
+                bytes_reported += len(frame)
                 now = time.monotonic()
                 if now >= next_report:
                     rms = math.sqrt(sum_squares / sample_count) if sample_count else 0.0
                     print(
                         f"PCM: {bytes_reported} bytes/2 s, pico {peak / 32768 * 100:.1f}%, "
-                        f"RMS {rms / 32768 * 100:.1f}%"
+                        f"RMS {rms / 32768 * 100:.1f}%, "
+                        f"quadros descartados {dropped_frames}"
                     )
                     next_report = now + 2.0
                     bytes_reported = 0
+                    dropped_frames = 0
                     peak = 0
                     sum_squares = 0
                     sample_count = 0
