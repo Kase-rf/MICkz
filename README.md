@@ -51,7 +51,7 @@ bash linux/install.sh
 
 Depois, procure por **MICkz** no menu de aplicativos e abra-o como qualquer outro programa; não é necessário manter um terminal aberto. O instalador copia a interface e o receptor para `~/.local/share/mickz` e cria o lançador em `~/.local/share/applications`.
 
-Na janela, clique em **Iniciar receptor** antes de conectar o celular. Para Wi-Fi, use o IP mostrado na janela no app Android. Para USB, conecte e autorize o telefone, clique em **Configurar USB** e use `127.0.0.1` no app. Os níveis de pico/RMS e as mensagens do receptor aparecem na área **Atividade**. **Parar receptor** remove a fonte virtual do sistema.
+Na janela, clique em **Iniciar receptor** antes de conectar o celular. Para Wi-Fi, use o IP mostrado na janela no modo **Wi-Fi (sem cabo)** do app Android. Para USB, conecte e autorize o telefone, clique em **Configurar USB** e escolha o modo **USB** no app; ele usará `127.0.0.1`. Os níveis de pico/RMS e as mensagens do receptor aparecem na área **Atividade**. **Parar receptor** remove a fonte virtual do sistema.
 
 O app usa Tkinter, incluído em muitas instalações do Python. Se o instalador disser que Tkinter não está disponível, instale-o no CachyOS com `sudo pacman -S tk` e execute o instalador novamente. Para USB, instale também `sudo pacman -S android-tools` se `adb` não estiver disponível.
 
@@ -77,16 +77,16 @@ Durante a conexão, a interface mostra os níveis de pico/RMS do áudio a cada d
 
 ## Android por Wi-Fi
 
-1. Conecte o computador e o celular à mesma rede local.
-2. Descubra o IPv4 do computador com `ip -4 addr` (por exemplo, `192.168.1.20`).
+1. Conecte o computador e o celular à mesma rede Wi-Fi (não precisa conectar o cabo USB).
+2. Na interface MICkz do Linux, inicie o receptor e anote o IP exibido (por exemplo, `192.168.1.20`).
 3. Abra `android/` no Android Studio, compile e instale o app no celular.
-4. No app, informe o IP do computador e toque em **Conectar**. Autorize o uso do microfone.
+4. No app, selecione **Wi-Fi (sem cabo)**, informe o IP do computador e toque em **Conectar**. Autorize o uso do microfone. O app inicia nesse modo; `127.0.0.1` só deve ser usado com o modo USB.
 
 Para melhor latência, prefira Wi-Fi de 5 GHz e mantenha o celular perto do roteador.
 
 ## Android por USB
 
-Ative a depuração USB no Android e conecte o cabo. Na interface Linux, inicie o receptor e clique em **Configurar USB**. No app Android use host `127.0.0.1` e toque em **Conectar**. O áudio passa pelo cabo USB; não é necessário compartilhar a rede Wi-Fi. Se preferir configurar manualmente, execute `adb reverse tcp:49152 tcp:49152` com o receptor ativo.
+Ative a depuração USB no Android e conecte o cabo. Na interface Linux, inicie o receptor e clique em **Configurar USB**. No app Android escolha o modo **USB** e toque em **Conectar**. O áudio passa pelo cabo USB; não é necessário compartilhar a rede Wi-Fi. Se preferir configurar manualmente, execute `adb reverse tcp:49152 tcp:49152` com o receptor ativo.
 
 ## Selecionar no Discord e nos jogos
 
@@ -108,6 +108,7 @@ pactl list short sources
 ## Solução de problemas
 
 - Se o MICkz conecta, mas o nível de áudio fica zerado, feche outros apps que estejam capturando o microfone do Android (por exemplo, Audio Relay ou um gravador) e reconecte. A política de compartilhamento de entrada do Android pode entregar silêncio a um dos apps quando há disputa pelo microfone. [Documentação do Android sobre compartilhamento de entrada](https://developer.android.com/media/platform/sharing-audio-input).
+- Se a conexão só funcionar com cabo, confirme que o app está no modo **Wi-Fi (sem cabo)** e que o host é o IP do computador mostrado na interface Linux. `127.0.0.1` aponta para o próprio celular; no Wi-Fi os dois aparelhos também precisam estar na mesma rede, sem isolamento entre clientes, e a porta TCP `49152` deve estar liberada no firewall.
 
 ## Estrutura
 
