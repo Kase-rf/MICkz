@@ -4,7 +4,8 @@ Use o microfone de um celular Android como entrada de áudio no Linux. O app env
 
 ## Requisitos
 
-- CachyOS (ou outra distribuição com PipeWire e compatibilidade PulseAudio), `python` 3 e `pipewire-pulse`.
+- CachyOS (ou outra distribuição com PipeWire e compatibilidade PulseAudio), Python 3, Tkinter e `pipewire-pulse` para a interface gráfica do Linux.
+- `adb` (`android-tools` no CachyOS) para configurar a conexão USB pela interface.
 - Android 8.0 (API 26) ou mais recente.
 - Android Studio, Android SDK e JDK 17 para compilar o app. O projeto usa Android Gradle Plugin 8.13.2, compatível com Gradle 8.13. O receptor não usa dependências Python externas.
 
@@ -38,15 +39,25 @@ Ative as Opções do desenvolvedor e a depuração USB no Android. Conecte o cel
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Em outro terminal, inicie o receptor Linux com `python linux/mickz_receiver.py`. Depois crie o redirecionamento USB:
+Instale e abra a interface gráfica Linux conforme a seção abaixo. Inicie o receptor, use **Configurar USB** e, no app Android, mantenha o host `127.0.0.1`. Autorize o microfone. No Linux, selecione `mickz_android_mic` (descrição `MICkz_Android_Microphone`) como entrada no Discord.
+
+## Interface gráfica no CachyOS
+
+Execute uma vez, na pasta do projeto, para instalar o MICkz no menu de aplicativos do seu usuário:
 
 ```bash
-adb reverse tcp:49152 tcp:49152
+bash linux/install.sh
 ```
 
-Abra o MICkz no celular, mantenha o host `127.0.0.1` e toque em **Conectar**. Autorize o microfone. No Linux, confirme que a fonte virtual apareceu com `pactl list short sources` e selecione `mickz_android_mic` (descrição `MICkz_Android_Microphone`) como entrada no Discord. Se desconectar/reiniciar o cabo, rode `adb reverse` novamente.
+Depois, procure por **MICkz** no menu de aplicativos e abra-o como qualquer outro programa; não é necessário manter um terminal aberto. O instalador copia a interface e o receptor para `~/.local/share/mickz` e cria o lançador em `~/.local/share/applications`.
 
-## Receptor Linux
+Na janela, clique em **Iniciar receptor** antes de conectar o celular. Para Wi-Fi, use o IP mostrado na janela no app Android. Para USB, conecte e autorize o telefone, clique em **Configurar USB** e use `127.0.0.1` no app. Os níveis de pico/RMS e as mensagens do receptor aparecem na área **Atividade**. **Parar receptor** remove a fonte virtual do sistema.
+
+O app usa Tkinter, incluído em muitas instalações do Python. Se o instalador disser que Tkinter não está disponível, instale-o no CachyOS com `sudo pacman -S tk` e execute o instalador novamente. Para USB, instale também `sudo pacman -S android-tools` se `adb` não estiver disponível.
+
+Para atualizar a cópia instalada depois de receber mudanças no projeto, execute novamente `bash linux/install.sh`.
+
+## Receptor Linux e fonte de áudio
 
 Instale ferramentas de áudio caso ainda não estejam disponíveis:
 
@@ -54,15 +65,15 @@ Instale ferramentas de áudio caso ainda não estejam disponíveis:
 sudo pacman -S pipewire pipewire-pulse pipewire-audio pipewire-alsa
 ```
 
-Inicie o servidor:
+O jeito recomendado de iniciar o servidor é abrir **MICkz** pelo menu de aplicativos e clicar em **Iniciar receptor**. Para uso manual pelo terminal, o comando continua disponível:
 
 ```bash
 python linux/mickz_receiver.py
 ```
 
-O receptor abre a porta TCP `49152` em todas as interfaces e cria a fonte de entrada `mickz_android_mic` usando o módulo `module-pipe-source`. Se o firewall estiver ativo, permita a porta TCP 49152 na rede local. Encerre com `Ctrl+C`; a fonte virtual é removida ao sair.
+O receptor abre a porta TCP `49152` em todas as interfaces e cria a fonte de entrada `mickz_android_mic` usando o módulo `module-pipe-source`. Se o firewall estiver ativo, permita a porta TCP 49152 na rede local. Ao parar pela interface, a fonte virtual é removida automaticamente.
 
-Durante a conexão, o receptor informa a cada dois segundos bytes recebidos e os níveis de pico/RMS do PCM. Isso ajuda a distinguir silêncio vindo do celular de áudio que não chega à fonte virtual.
+Durante a conexão, a interface mostra os níveis de pico/RMS do áudio a cada dois segundos. Isso ajuda a distinguir silêncio vindo do celular de áudio que não chega à fonte virtual.
 
 ## Android por Wi-Fi
 
@@ -75,13 +86,7 @@ Para melhor latência, prefira Wi-Fi de 5 GHz e mantenha o celular perto do rote
 
 ## Android por USB
 
-Ative a depuração USB no Android, conecte o cabo e confirme que `adb devices` mostra o aparelho como autorizado. Com o receptor Linux em execução, rode:
-
-```bash
-adb reverse tcp:49152 tcp:49152
-```
-
-No app Android use host `127.0.0.1` e toque em **Conectar**. O áudio passa pelo cabo USB; não é necessário compartilhar a rede Wi-Fi.
+Ative a depuração USB no Android e conecte o cabo. Na interface Linux, inicie o receptor e clique em **Configurar USB**. No app Android use host `127.0.0.1` e toque em **Conectar**. O áudio passa pelo cabo USB; não é necessário compartilhar a rede Wi-Fi. Se preferir configurar manualmente, execute `adb reverse tcp:49152 tcp:49152` com o receptor ativo.
 
 ## Selecionar no Discord e nos jogos
 
@@ -107,4 +112,6 @@ pactl list short sources
 ## Estrutura
 
 - `android/`: app Android nativo Java, sem bibliotecas de terceiros.
+- `linux/mickz_gui.py`: interface gráfica para iniciar, parar e acompanhar o receptor.
 - `linux/mickz_receiver.py`: servidor TCP e ponte PCM para PipeWire.
+- `linux/install.sh`: instala o aplicativo no menu do desktop Linux.

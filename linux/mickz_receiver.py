@@ -45,10 +45,22 @@ class Receiver:
         self.port = port
         self.stop_event = threading.Event()
         self.server: socket.socket | None = None
+        self.client: socket.socket | None = None
         self.module_id: str | None = None
         self.fifo_dir: str | None = None
         self.fifo_path: str | None = None
         self.fifo_fd: int | None = None
+
+    def request_stop(self) -> None:
+        """Wake the accept/read loops so normal cleanup can run."""
+        self.stop_event.set()
+        if self.server is not None:
+            self.server.close()
+        if self.client is not None:
+            try:
+                self.client.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def setup_source(self) -> None:
         if not shutil.which("pactl"):
@@ -121,8 +133,16 @@ class Receiver:
                     connection, address = self.server.accept()
                 except TimeoutError:
                     continue
+                except OSError:
+                    if self.stop_event.is_set():
+                        break
+                    raise
                 with connection:
-                    self.serve_client(connection, address)
+                    self.client = connection
+                    try:
+                        self.serve_client(connection, address)
+                    finally:
+                        self.client = None
         finally:
             self.close()
 
@@ -149,7 +169,8 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=49152, help="Porta TCP (padrão: 49152)")
     args = parser.parse_args()
     receiver = Receiver(args.host, args.port)
-    signal.signal(signal.SIGTERM, lambda *_: receiver.close())
+    # Let the main loop exit normally so its finally block owns cleanup.
+    signal.signal(signal.SIGTERM, lambda *_: receiver.request_stop())
     try:
         receiver.run()
     except KeyboardInterrupt:
