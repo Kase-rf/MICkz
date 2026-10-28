@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import ipaddress
+import json
 import math
 import os
 import signal
@@ -22,6 +25,8 @@ SAMPLE_BYTES = 2
 FRAME_MS = 20
 FRAME_BYTES = SAMPLE_RATE * CHANNELS * SAMPLE_BYTES * FRAME_MS // 1000
 SOURCE_NAME = "mickz_android_mic"
+DISCOVERY_REQUEST = b"MICKZ/1 DISCOVER\n"
+STREAM_REQUEST = b"MICKZ/1 STREAM\n"
 
 
 def run_checked(command: list[str]) -> str:
@@ -39,12 +44,126 @@ def receive_exactly(connection: socket.socket, size: int) -> bytes | None:
     return bytes(chunks)
 
 
+def receive_line(connection: socket.socket, max_bytes: int = 256) -> bytes | None:
+    result = bytearray()
+    while len(result) < max_bytes:
+        byte = connection.recv(1)
+        if not byte:
+            return None
+        if byte == b"\n":
+            return bytes(result)
+        result.extend(byte)
+    return None
+
+
+def local_networks() -> list[tuple[ipaddress.IPv4Network, str]]:
+    """Return routable IPv4 LANs, preferring Wi-Fi interfaces."""
+    result = subprocess.run(
+        ["ip", "-j", "-4", "addr", "show", "scope", "global"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    interfaces = json.loads(result.stdout)
+    networks: list[tuple[ipaddress.IPv4Network, str, int]] = []
+    ignored_prefixes = ("lo", "docker", "podman", "virbr", "br-", "veth", "tun", "tap", "wg", "tailscale", "zt")
+    for interface in interfaces:
+        name = interface.get("ifname", "")
+        if name.startswith(ignored_prefixes):
+            continue
+        for address in interface.get("addr_info", []):
+            if address.get("family") != "inet" or address.get("scope") != "global":
+                continue
+            local = address.get("local")
+            prefix = address.get("prefixlen")
+            if not local or prefix is None:
+                continue
+            network = ipaddress.IPv4Network(f"{local}/{prefix}", strict=False)
+            if network.num_addresses > 2:
+                # Avoid sending probes outside the user's local address space.
+                networks.append((network, local, 0 if name.startswith(("wl", "wlan")) else 1))
+    networks.sort(key=lambda entry: entry[2])
+    unique: dict[str, tuple[ipaddress.IPv4Network, str]] = {}
+    for network, local, _priority in networks:
+        unique.setdefault(str(network), (network, local))
+    return list(unique.values())
+
+
+def nearby_hosts(network: ipaddress.IPv4Network, local: str):
+    """Yield subnet addresses from nearest to farthest without building huge lists."""
+    own = int(ipaddress.IPv4Address(local))
+    first = int(network.network_address) + 1
+    last = int(network.broadcast_address) - 1
+    distance = 1
+    while own - distance >= first or own + distance <= last:
+        lower = own - distance
+        upper = own + distance
+        if lower >= first:
+            yield str(ipaddress.IPv4Address(lower))
+        if upper <= last:
+            yield str(ipaddress.IPv4Address(upper))
+        distance += 1
+
+
+def probe_android(host: str, port: int) -> str | None:
+    """Identify a MICkz Android service without starting microphone capture."""
+    try:
+        with socket.create_connection((host, port), timeout=0.35) as connection:
+            connection.settimeout(0.5)
+            connection.sendall(DISCOVERY_REQUEST)
+            response = receive_line(connection)
+            prefix = b"MICKZ/1 ANDROID "
+            if response and response.startswith(prefix):
+                return response[len(prefix):].decode("utf-8", errors="replace")
+    except OSError:
+        pass
+    return None
+
+
+def discover_android(port: int, stop_event: threading.Event) -> tuple[str, str] | None:
+    """Scan local subnets using outbound TCP probes and return the first MICkz phone."""
+    networks = local_networks()
+    for network, local in networks:
+        candidates = nearby_hosts(network, local)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=48) as pool:
+            pending: dict[concurrent.futures.Future[str | None], str] = {}
+            addresses = iter(candidates)
+            exhausted = False
+            while pending or not exhausted:
+                while not exhausted and len(pending) < 48 and not stop_event.is_set():
+                    try:
+                        candidate = next(addresses)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    pending[pool.submit(probe_android, candidate, port)] = candidate
+                if stop_event.is_set():
+                    for future in pending:
+                        future.cancel()
+                    return None
+                if not pending:
+                    break
+                done, _ = concurrent.futures.wait(
+                    pending, timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED
+                )
+                for future in done:
+                    candidate = pending.pop(future)
+                    try:
+                        device_name = future.result()
+                    except OSError:
+                        device_name = None
+                    if device_name is not None:
+                        for other in pending:
+                            other.cancel()
+                        return candidate, device_name
+    return None
+
+
 class Receiver:
     def __init__(self, host: str, port: int) -> None:
         self.host = host
         self.port = port
         self.stop_event = threading.Event()
-        self.server: socket.socket | None = None
         self.client: socket.socket | None = None
         self.module_id: str | None = None
         self.fifo_dir: str | None = None
@@ -52,15 +171,14 @@ class Receiver:
         self.fifo_fd: int | None = None
 
     def request_stop(self) -> None:
-        """Wake the accept/read loops so normal cleanup can run."""
+        """Wake the connection/read loops so normal cleanup can run."""
         self.stop_event.set()
-        if self.server is not None:
-            self.server.close()
         if self.client is not None:
             try:
                 self.client.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
+            self.client.close()
 
     def setup_source(self) -> None:
         if not shutil.which("pactl"):
@@ -97,13 +215,8 @@ class Receiver:
             print(f"Fonte MICkz antiga removida (módulo {module_id})")
 
     def serve_client(self, connection: socket.socket, address: tuple[str, int]) -> None:
-        print(f"Android conectado: {address[0]}:{address[1]}")
-        next_report = time.monotonic() + 2.0
-        bytes_reported = 0
-        dropped_frames = 0
-        peak = 0
-        sum_squares = 0
-        sample_count = 0
+        print("STATUS: connected", flush=True)
+        next_level = time.monotonic()
         try:
             if self.fifo_fd is None:
                 raise RuntimeError("A fonte de áudio não está aberta.")
@@ -112,70 +225,89 @@ class Receiver:
                 if frame is None:
                     break
                 samples = struct.unpack("<" + "h" * (len(frame) // 2), frame)
-                peak = max(peak, max(abs(sample) for sample in samples))
-                sum_squares += sum(sample * sample for sample in samples)
-                sample_count += len(samples)
                 try:
                     written = os.write(self.fifo_fd, frame)
                 except BlockingIOError:
                     # PipeWire may suspend this source until an app selects it.
                     # Keep draining TCP and report levels instead of deadlocking.
                     written = 0
-                    dropped_frames += 1
                 if written not in (0, len(frame)):
                     raise OSError(f"Escrita PCM incompleta: {written}/{len(frame)} bytes")
-                bytes_reported += len(frame)
                 now = time.monotonic()
-                if now >= next_report:
-                    rms = math.sqrt(sum_squares / sample_count) if sample_count else 0.0
-                    print(
-                        f"PCM: {bytes_reported} bytes/2 s, pico {peak / 32768 * 100:.1f}%, "
-                        f"RMS {rms / 32768 * 100:.1f}%, "
-                        f"quadros descartados {dropped_frames}"
-                    )
-                    next_report = now + 2.0
-                    bytes_reported = 0
-                    dropped_frames = 0
-                    peak = 0
-                    sum_squares = 0
-                    sample_count = 0
+                if now >= next_level:
+                    rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+                    level = min(1.0, (rms / 32768) * 2.5)
+                    print(f"LEVEL:{level:.4f}", flush=True)
+                    next_level = now + 0.04
         except (BrokenPipeError, ConnectionError, OSError) as error:
             if not self.stop_event.is_set():
                 print(f"Conexão de áudio encerrada: {error}", file=sys.stderr)
         finally:
-            print("Android desconectado")
+            print("STATUS: disconnected", flush=True)
+
+    def connect_stream(self, host: str, port: int) -> socket.socket:
+        connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.client = connection
+        try:
+            connection.settimeout(2)
+            connection.connect((host, port))
+            connection.settimeout(1)
+            connection.sendall(STREAM_REQUEST)
+            response = receive_line(connection)
+            if response != b"MICKZ/1 OK":
+                raise ConnectionError("O dispositivo respondeu com um protocolo MICkz desconhecido.")
+            connection.settimeout(None)
+            return connection
+        except Exception:
+            connection.close()
+            self.client = None
+            raise
 
     def run(self) -> None:
         self.setup_source()
-        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server.bind((self.host, self.port))
-        self.server.listen(1)
-        self.server.settimeout(1)
-        print(f"Aguardando Android em {self.host}:{self.port} (PCM mono 48 kHz)")
+        print("STATUS: disconnected", flush=True)
+        last_error = ""
+        last_report = 0.0
         try:
             while not self.stop_event.is_set():
+                if self.host == "auto":
+                    print("STATUS: searching", flush=True)
+                    found = discover_android(self.port, self.stop_event)
+                    if found is None:
+                        if not self.stop_event.is_set():
+                            self.stop_event.wait(1)
+                        continue
+                    host, device_name = found
+                    print(f"DEVICE:{host}|{device_name}", flush=True)
+                else:
+                    host = self.host
+                    device_name = "Android por USB" if host == "127.0.0.1" else "Android"
                 try:
-                    connection, address = self.server.accept()
-                except TimeoutError:
-                    continue
-                except OSError:
+                    connection = self.connect_stream(host, self.port)
+                except OSError as error:
                     if self.stop_event.is_set():
                         break
-                    raise
+                    message = str(error)
+                    now = time.monotonic()
+                    if message != last_error or now - last_report >= 10:
+                        print(f"Conexão com {host} falhou: {message}", flush=True)
+                        last_error = message
+                        last_report = now
+                    self.stop_event.wait(2)
+                    continue
                 with connection:
-                    self.client = connection
                     try:
-                        self.serve_client(connection, address)
+                        print(f"DEVICE:{host}|{device_name}", flush=True)
+                        self.serve_client(connection, (host, self.port))
                     finally:
                         self.client = None
+                if self.host != "auto":
+                    self.stop_event.wait(2)
         finally:
             self.close()
 
     def close(self) -> None:
         self.stop_event.set()
-        if self.server is not None:
-            self.server.close()
         if self.module_id:
             subprocess.run(["pactl", "unload-module", self.module_id], check=False)
             print("Fonte virtual removida")
@@ -191,7 +323,7 @@ class Receiver:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="0.0.0.0", help="Interface para escutar (padrão: todas)")
+    parser.add_argument("--host", default="auto", help="IP do Android ou 'auto' para buscar na rede")
     parser.add_argument("--port", type=int, default=49152, help="Porta TCP (padrão: 49152)")
     args = parser.parse_args()
     receiver = Receiver(args.host, args.port)

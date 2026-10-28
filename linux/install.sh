@@ -14,6 +14,17 @@ if ! python3 -c 'import tkinter' >/dev/null 2>&1; then
     echo "Erro: Tkinter não está disponível. No CachyOS, instale o pacote tk e execute este instalador novamente." >&2
     exit 1
 fi
+missing=""
+for dependency in pactl ip; do
+    if ! command -v "$dependency" >/dev/null 2>&1; then
+        missing="$missing $dependency"
+    fi
+done
+if [ -n "$missing" ]; then
+    echo "Erro: faltam comandos necessários:$missing" >&2
+    echo "No CachyOS/Arch, instale pipewire-pulse e iproute2; em outras distribuições, instale os pacotes equivalentes." >&2
+    exit 1
+fi
 
 mkdir -p "$APP_DIR" "$APPLICATIONS_DIR"
 install -m 0644 "$SCRIPT_DIR/mickz_gui.py" "$APP_DIR/mickz_gui.py"
